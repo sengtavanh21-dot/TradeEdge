@@ -1,9 +1,12 @@
 {
   "dependencies": {
     "@anthropic-ai/sdk": "0.125.0",
-    "@trigger.dev/sdk": "4.6.0"
+    "@trigger.dev/sdk": "4.6.3",
+    "dotenv": "^17.4.2"
   },
   "devDependencies": {
-    "@trigger.dev/build": "4.6.0"
+    "@trigger.dev/build": "4.6.3",
+    "@types/node": "^22.20.3",
+    "tsx": "^4.23.13"
   }
 }

@@ -51,7 +51,7 @@ export async function writeToNotion(
 export const stockCheck = schedules.task({
     id: "stock-check",
     retry:{ maxAttempts: 1 },
-//     cron: "0 */6 * * *", // test: every 6 hours
+    cron: "0 */6 * * 1-5", // every 6 hours, Mon–Fri (UTC)
     run: async (payload)=> {
         const ticker = process.env.WATCHED_TICKER;
         const apiKey = process.env.ALPHA_VANTAGE_API_KEY;

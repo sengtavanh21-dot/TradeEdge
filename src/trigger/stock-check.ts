@@ -67,12 +67,16 @@ export const stockCheck = schedules.task({
             }
             const data = await response.json();
 
+            if (data["Information"] || data["Note"]) {
+                throw new Error("Alpha Vantage rate limit reached");
+            }
+
             if (!data["Global Quote"]) {
-              throw new Error(`No Global Quote in response: ${JSON.stringify(data)}`);
+              throw new Error(`Unexpected Alpha Vantage response (keys: ${Object.keys(data).join(", ")})`);
             }
             const price = parseFloat(data["Global Quote"]["05. price"]);
             if (Number.isNaN(price)) {
-                throw new Error(`Could not parse price from response: ${JSON.stringify(data)}`);
+                throw new Error(`Unexpected Alpha Vantage response (keys: ${Object.keys(data["Global Quote"]).join(", ")})`);
             }
 
             console.log(`Checking stock for: ${ticker}`);

@@ -1,52 +1,5 @@
-import {schedules, runs} from "@trigger.dev/sdk";
-import Anthropic from "@anthropic-ai/sdk";
-
-const anthropic = new Anthropic();
-
-export async function writeToNotion(
-    ticker: string,
-    price: number,
-    percentChange: number | null,
-    signal: string,
-    reasoning: string,
-) {
-    const apiKey = process.env.NOTION_API_KEY;
-    const databaseId = process.env.NOTION_DATABASE_ID;
-
-    if (!apiKey) throw new Error("NOTION_API_KEY is not set");
-    if (!databaseId) throw new Error("NOTION_DATABASE_ID is not set");
-
-    const url = "https://api.notion.com/v1/pages";
-    const body = {
-        parent: {database_id: databaseId},
-        properties: {
-            Ticker: {title: [{text: {content: ticker}}]},
-            Price: {number: price},
-            "Percent Change": {number: percentChange},
-            Signal: {select: {name: signal}},
-            Reasoning: {rich_text: [{text: {content: reasoning}}]},
-        },
-    };
-
-    try {
-        const response = await fetch(url, {
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${apiKey}`,
-                "Notion-Version": "2022-06-28",
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(10_000),
-        });
-        if (!response.ok) {
-            throw new Error(`Failed to write to Notion: ${response.statusText}`);
-        }
-    } catch (error) {
-        console.error(`Error writing to Notion for ${ticker}:`, error);
-        throw error;
-    }
-}
+import {schedules, runs, idempotencyKeys} from "@trigger.dev/sdk";
+import { stockProcess } from "./stock-process.js";
 
 export const stockCheck = schedules.task({
     id: "stock-check",
@@ -78,74 +31,52 @@ export const stockCheck = schedules.task({
             if (Number.isNaN(price)) {
                 throw new Error(`Unexpected Alpha Vantage response (keys: ${Object.keys(data["Global Quote"]).join(", ")})`);
             }
+            const tradingDay: string | undefined = data["Global Quote"]["07. latest trading day"];
+            if (!tradingDay) {
+                throw new Error("Unexpected Alpha Vantage response (no trading day)");
+            }
 
             console.log(`Checking stock for: ${ticker}`);
             console.log(`Current price for ${ticker}: ${price}`);
 
-            // Find the previous completed run of this task so we have a price to compare against.
+            // Find the last completed stock-process run so we have a price and trading day to compare against.
             const previousRuns = await runs.list({
-                taskIdentifier: "stock-check",
+                taskIdentifier: "stock-process",
                 status: "COMPLETED",
                 limit: 1,
             });
             const previousRunSummary = previousRuns.data[0];
 
-            let previousPrice: number | null = null;
+            let previousOutput: { ticker?: string; price?: number; tradingDay?: string } | null = null;
             if (previousRunSummary) {
                 const previousRun = await runs.retrieve(previousRunSummary.id);
                 // Only compare against the previous run if it was checking the same ticker -
                 // otherwise a changed WATCHED_TICKER would produce a nonsense percent change.
                 if (previousRun.output?.ticker === ticker) {
-                    previousPrice = previousRun.output?.price ?? null;
+                    previousOutput = previousRun.output;
                 }
             }
 
+            if (previousOutput?.tradingDay === tradingDay) {
+                console.log(`No new trading day (${tradingDay}), skipping`);
+                return { skipped: true, ticker, tradingDay };
+            }
+
+            const previousPrice: number | null = previousOutput?.price ?? null;
             const percentChange = previousPrice !== null
                 ? ((price - previousPrice) / previousPrice) * 100
                 : null;
 
-            const systemPrompt = `You are a stock trading signal assistant. Reply with JSON only - no prose, no markdown code fences - in exactly this shape: {"signal": "BUY" | "SELL" | "HOLD", "percent_change": number, "reasoning": string}.`;
+            const result = await stockProcess.triggerAndWait(
+                { ticker, price, previousPrice, percentChange, tradingDay },
+                { idempotencyKey: await idempotencyKeys.create(`${ticker}-${tradingDay}`, { scope: "global" }) },
+            );
 
-            const userPrompt = previousPrice !== null
-                ? `Ticker: ${ticker}\nCurrent price: ${price}\nPrevious price: ${previousPrice}\nPercent change: ${percentChange!.toFixed(4)}%`
-                : `Ticker: ${ticker}\nCurrent price: ${price}\nThere is no previous run yet, so there is no prior price to compare against.`;
-
-            const message = await anthropic.messages.create({
-                model: "claude-haiku-4-5-20251001",
-                max_tokens: 1024,
-                system: systemPrompt,
-                messages: [{ role: "user", content: userPrompt }],
-            });
-
-            const textBlock = message.content.find((block) => block.type === "text");
-            if (!textBlock || textBlock.type !== "text") {
-                throw new Error("No text response from Claude");
+            if (!result.ok) {
+                throw new Error("stock-process failed");
             }
 
-            const cleanedText = textBlock.text
-                .trim()
-                .replace(/^```(?:json)?\s*/i, "")
-                .replace(/```\s*$/, "")
-                .trim();
-
-            let aiAnalysis: { signal: string; percent_change: number; reasoning: string };
-            try {
-                aiAnalysis = JSON.parse(cleanedText);
-            } catch (parseError) {
-                throw new Error(`Failed to parse Claude JSON response: ${textBlock.text}`);
-            }
-
-            const result = {
-                ticker,
-                price,
-                previousPrice,
-                percentChange,
-                ai: aiAnalysis,
-            };
-
-            await writeToNotion(ticker, price, percentChange, aiAnalysis.signal, aiAnalysis.reasoning);
-
-            return result;
+            return result.output;
         } catch (error) {
             console.error(`Error checking stock for ${ticker}:`, error);
             throw error;
